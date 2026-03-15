@@ -1,0 +1,160 @@
+diff --git a/test_result.md b/test_result.md
+index cdf1fe0..d075690 100644
+--- a/test_result.md
++++ b/test_result.md
+@@ -143,15 +143,18 @@ backend:
+ 
+   - task: "Password Reset (MOCKED)"
+     implemented: true
+-    working: NA
++    working: true
+     file: "server.py"
+     stuck_count: 0
+     priority: "medium"
+-    needs_retesting: true
++    needs_retesting: false
+     status_history:
+       - working: NA
+         agent: "main"
+         comment: "Implemented MOCKED reset code generation"
++      - working: true
++        agent: "testing"
++        comment: "MOCKED password reset working correctly - generates reset code and allows password change"
+ 
+   - task: "Shift Actions (Start/End/Pause)"
+     implemented: true
+@@ -167,75 +170,93 @@ backend:
+ 
+   - task: "Shift Status and History"
+     implemented: true
+-    working: NA
++    working: true
+     file: "server.py"
+     stuck_count: 0
+     priority: "high"
+-    needs_retesting: true
++    needs_retesting: false
+     status_history:
+       - working: NA
+         agent: "main"
+         comment: "Current status and history endpoints implemented"
++      - working: true
++        agent: "testing"
++        comment: "All shift endpoints working: current-status, today, history, daily-summary all return correct data"
+ 
+   - task: "Monthly Report Generation"
+     implemented: true
+-    working: NA
++    working: false
+     file: "server.py"
+-    stuck_count: 0
++    stuck_count: 1
+     priority: "high"
+-    needs_retesting: true
++    needs_retesting: false
+     status_history:
+       - working: NA
+         agent: "main"
+         comment: "Monthly report generation with daily summaries"
++      - working: false
++        agent: "testing"
++        comment: "CRITICAL: MongoDB ObjectId serialization error - ValueError: ObjectId object is not iterable. Backend returns 500 error when generating monthly reports"
+ 
+   - task: "Employee Signature"
+     implemented: true
+-    working: NA
++    working: false
+     file: "server.py"
+-    stuck_count: 0
++    stuck_count: 1
+     priority: "high"
+-    needs_retesting: true
++    needs_retesting: false
+     status_history:
+       - working: NA
+         agent: "main"
+         comment: "Sign monthly report endpoint implemented"
++      - working: false
++        agent: "testing"
++        comment: "Cannot test - depends on Monthly Report Generation which is failing due to ObjectId serialization error"
+ 
+   - task: "Admin Counter-signature"
+     implemented: true
+-    working: NA
++    working: false
+     file: "server.py"
+-    stuck_count: 0
++    stuck_count: 1
+     priority: "high"
+-    needs_retesting: true
++    needs_retesting: false
+     status_history:
+       - working: NA
+         agent: "main"
+         comment: "Counter-sign endpoint for admin"
++      - working: false
++        agent: "testing"
++        comment: "Cannot test - depends on Monthly Report Generation which is failing due to ObjectId serialization error"
+ 
+   - task: "Admin Employee Management"
+     implemented: true
+-    working: NA
++    working: true
+     file: "server.py"
+     stuck_count: 0
+     priority: "high"
+-    needs_retesting: true
++    needs_retesting: false
+     status_history:
+       - working: NA
+         agent: "main"
+         comment: "Get all employees, shifts, locations endpoints"
++      - working: true
++        agent: "testing"
++        comment: "All admin endpoints working: employees list, employee shifts, employee locations, unsigned reports, today activity"
+ 
+   - task: "Profile Update with Picture"
+     implemented: true
+-    working: NA
++    working: true
+     file: "server.py"
+     stuck_count: 0
+     priority: "medium"
+-    needs_retesting: true
++    needs_retesting: false
+     status_history:
+       - working: NA
+         agent: "main"
+         comment: "Profile update with base64 profile picture"
++      - working: true
++        agent: "testing"
++        comment: "Profile endpoints working: get profile, update profile (name, language, picture), change password all successful"
+ 
+ frontend:
+   - task: "Login Screen"
+@@ -390,14 +411,18 @@ metadata:
+ 
+ test_plan:
+   current_focus:
+-    - "User Authentication (Login)"
+-    - "User Registration"
+-    - "Shift Actions (Start/End/Pause)"
+     - "Monthly Report Generation"
+-  stuck_tasks: []
++    - "Employee Signature"
++    - "Admin Counter-signature"
++  stuck_tasks:
++    - "Monthly Report Generation"
++    - "Employee Signature"
++    - "Admin Counter-signature"
+   test_all: false
+   test_priority: "high_first"
+ 
+ agent_communication:
+   - agent: "main"
+-    message: "Initial implementation complete. Need to test all backend endpoints and frontend flows. Please test authentication, shift management, and monthly report workflows."
+\ No newline at end of file
++    message: "Initial implementation complete. Need to test all backend endpoints and frontend flows. Please test authentication, shift management, and monthly report workflows."
++  - agent: "testing"
++    message: "Backend testing completed. CRITICAL ISSUE: Monthly Report Generation failing with MongoDB ObjectId serialization error. All other endpoints working correctly. Authentication, shift management, user profiles, and admin functions all pass tests. Monthly reports, employee signatures, and admin counter-signatures blocked by ObjectId serialization bug."
+\ No newline at end of file
