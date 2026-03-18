@@ -16,7 +16,53 @@ api.interceptors.request.use(async (config) => {
   return config;
 });
 
-// Shift Actions
+// ==================== DATE / TIME HELPERS ====================
+
+export const formatDateTimeItaly = (dateString?: string | null) => {
+  if (!dateString) return '';
+  const date = new Date(dateString);
+
+  if (isNaN(date.getTime())) return dateString;
+
+  return date.toLocaleString('it-IT', {
+    timeZone: 'Europe/Rome',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+export const formatTimeItaly = (dateString?: string | null) => {
+  if (!dateString) return '';
+  const date = new Date(dateString);
+
+  if (isNaN(date.getTime())) return dateString;
+
+  return date.toLocaleTimeString('it-IT', {
+    timeZone: 'Europe/Rome',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+export const formatDateItaly = (dateString?: string | null) => {
+  if (!dateString) return '';
+  const date = new Date(dateString);
+
+  if (isNaN(date.getTime())) return dateString;
+
+  return date.toLocaleDateString('it-IT', {
+    timeZone: 'Europe/Rome',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+};
+
+// ==================== SHIFT ACTIONS ====================
+
 export const recordShiftAction = async (data: {
   action_type: 'start' | 'end' | 'pause_start' | 'pause_end';
   latitude?: number;
@@ -48,7 +94,8 @@ export const getDailySummary = async (date: string) => {
   return response.data;
 };
 
-// Monthly Reports
+// ==================== MONTHLY REPORTS ====================
+
 export const getMonthlyReport = async (year: number, month: number) => {
   const response = await api.get(`/reports/monthly/${year}/${month}`);
   return response.data;
@@ -59,7 +106,8 @@ export const signMonthlyReport = async (year: number, month: number, signature: 
   return response.data;
 };
 
-// User Profile
+// ==================== USER PROFILE ====================
+
 export const updateProfile = async (data: {
   name?: string;
   language?: string;
@@ -77,7 +125,8 @@ export const changePassword = async (currentPassword: string, newPassword: strin
   return response.data;
 };
 
-// Admin APIs
+// ==================== ADMIN APIs ====================
+
 export const getAllEmployees = async () => {
   const response = await api.get('/admin/employees');
   return response.data;
@@ -89,9 +138,10 @@ export const getEmployeeShifts = async (employeeId: string, days: number = 30) =
 };
 
 export const getEmployeeLocations = async (employeeId: string, date?: string) => {
-  const url = date 
-    ? `/admin/employees/${employeeId}/locations?date=${date}`
-    : `/admin/employees/${employeeId}/locations`;
+  const url =
+    date
+      ? `/admin/employees/${employeeId}/locations?date=${date}`
+      : `/admin/employees/${employeeId}/locations`;
   const response = await api.get(url);
   return response.data;
 };
