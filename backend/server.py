@@ -9,7 +9,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import jwt
 from passlib.context import CryptContext
@@ -23,6 +23,21 @@ ROME_TZ = ZoneInfo("Europe/Rome")
 
 def now_rome():
     return datetime.now(ROME_TZ)
+
+
+def mongo_to_rome(dt: datetime | None):
+    if not dt:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(ROME_TZ)
+
+
+def mongo_to_rome_iso(dt: datetime | None):
+    converted = mongo_to_rome(dt)
+    return converted.isoformat() if converted else None
 
 
 # MongoDB connection
@@ -55,9 +70,9 @@ logger = logging.getLogger(__name__)
 class UserBase(BaseModel):
     email: EmailStr
     name: str
-    role: str = "employee"  # "admin" or "employee"
+    role: str = "employee"
     profile_picture: Optional[str] = None
-    language: str = "it"  # Default Italian
+    language: str = "it"
 
 class UserCreate(BaseModel):
     email: EmailStr
@@ -85,7 +100,7 @@ class TokenResponse(BaseModel):
 class ShiftAction(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
-    action_type: str  # "start", "end", "pause_start", "pause_end"
+    action_type: str
     timestamp: datetime = Field(default_factory=now_rome)
     latitude: Optional[float] = None
     longitude: Optional[float] = None
@@ -129,7 +144,7 @@ class MonthlyReport(BaseModel):
     created_at: datetime = Field(default_factory=now_rome)
 
 class SignatureSubmit(BaseModel):
-    signature: str  # base64 encoded signature
+    signature: str
 
 class PasswordResetRequest(BaseModel):
     email: EmailStr
@@ -186,7 +201,6 @@ async def get_admin_user(current_user: dict = Depends(get_current_user)):
 # ==================== SEED ADMIN ACCOUNTS ====================
 
 async def seed_admin_accounts():
-    """Create pre-defined admin accounts if they don't exist"""
     admin_accounts = [
         {"email": "info@elektro3f.it", "name": "Admin Info"},
         {"email": "elektro3fbz@gmail.com", "name": "Admin BZ"}
@@ -212,7 +226,6 @@ async def seed_admin_accounts():
 @app.on_event("startup")
 async def startup_event():
     await seed_admin_accounts()
-    # Create indexes
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
     await db.shift_actions.create_index("user_id")
@@ -224,7 +237,6 @@ async def startup_event():
 
 @api_router.post("/auth/register", response_model=TokenResponse)
 async def register(user: UserCreate):
-    """Register a new employee account"""
     existing = await db.users.find_one({"email": user.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -257,7 +269,6 @@ async def register(user: UserCreate):
 
 @api_router.post("/auth/login", response_model=TokenResponse)
 async def login(credentials: UserLogin):
-    """Login with email and password"""
     user = await db.users.find_one({"email": credentials.email})
     if not user or not verify_password(credentials.password, user["password"]):
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -278,7 +289,6 @@ async def login(credentials: UserLogin):
 
 @api_router.post("/auth/forgot-password")
 async def forgot_password(request: PasswordResetRequest):
-    """Request password reset (MOCKED - no actual email sent)"""
     user = await db.users.find_one({"email": request.email})
     if not user:
         return {"message": "If an account exists with this email, a reset code has been sent"}
@@ -297,12 +307,11 @@ async def forgot_password(request: PasswordResetRequest):
 
 @api_router.post("/auth/reset-password")
 async def reset_password(request: PasswordResetConfirm):
-    """Confirm password reset with code"""
     reset_record = await db.password_resets.find_one({"email": request.email})
     if not reset_record or reset_record["code"] != request.reset_code:
         raise HTTPException(status_code=400, detail="Invalid reset code")
     
-    if now_rome() - reset_record["created_at"] > timedelta(minutes=30):
+    if now_rome() - mongo_to_rome(reset_record["created_at"]) > timedelta(minutes=30):
         raise HTTPException(status_code=400, detail="Reset code expired")
     
     await db.users.update_one(
@@ -317,7 +326,6 @@ async def reset_password(request: PasswordResetConfirm):
 
 @api_router.get("/users/me", response_model=UserResponse)
 async def get_me(current_user: dict = Depends(get_current_user)):
-    """Get current user profile"""
     return UserResponse(
         id=current_user["id"],
         email=current_user["email"],
@@ -325,12 +333,11 @@ async def get_me(current_user: dict = Depends(get_current_user)):
         role=current_user["role"],
         profile_picture=current_user.get("profile_picture"),
         language=current_user.get("language", "it"),
-        created_at=current_user["created_at"]
+        created_at=mongo_to_rome(current_user["created_at"])
     )
 
 @api_router.put("/users/me", response_model=UserResponse)
 async def update_profile(update: ProfileUpdate, current_user: dict = Depends(get_current_user)):
-    """Update current user profile"""
     update_data = {}
     if update.name:
         update_data["name"] = update.name
@@ -350,12 +357,11 @@ async def update_profile(update: ProfileUpdate, current_user: dict = Depends(get
         role=updated_user["role"],
         profile_picture=updated_user.get("profile_picture"),
         language=updated_user.get("language", "it"),
-        created_at=updated_user["created_at"]
+        created_at=mongo_to_rome(updated_user["created_at"])
     )
 
 @api_router.put("/users/me/password")
 async def change_password(data: PasswordChange, current_user: dict = Depends(get_current_user)):
-    """Change current user password"""
     if not verify_password(data.current_password, current_user["password"]):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
     
@@ -369,7 +375,6 @@ async def change_password(data: PasswordChange, current_user: dict = Depends(get
 
 @api_router.post("/shifts/action", response_model=ShiftAction)
 async def record_shift_action(action: ShiftActionCreate, current_user: dict = Depends(get_current_user)):
-    """Record a shift action (start, end, pause_start, pause_end)"""
     action_data = {
         "id": str(uuid.uuid4()),
         "user_id": current_user["id"],
@@ -385,7 +390,6 @@ async def record_shift_action(action: ShiftActionCreate, current_user: dict = De
 
 @api_router.get("/shifts/today")
 async def get_today_shifts(current_user: dict = Depends(get_current_user)):
-    """Get today's shift actions for current user"""
     today_start = now_rome().replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
     
@@ -394,11 +398,17 @@ async def get_today_shifts(current_user: dict = Depends(get_current_user)):
         "timestamp": {"$gte": today_start, "$lt": today_end}
     }).sort("timestamp", 1).to_list(100)
     
-    return [{**a, "_id": str(a["_id"])} for a in actions]
+    return [
+        {
+            **a,
+            "_id": str(a["_id"]),
+            "timestamp": mongo_to_rome_iso(a.get("timestamp"))
+        }
+        for a in actions
+    ]
 
 @api_router.get("/shifts/current-status")
 async def get_current_shift_status(current_user: dict = Depends(get_current_user)):
-    """Get current shift status (in_shift, on_break, etc.)"""
     today_start = now_rome().replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
     
@@ -412,19 +422,26 @@ async def get_current_shift_status(current_user: dict = Depends(get_current_user
         "on_break": False,
         "shift_started_at": None,
         "current_break_started_at": None,
-        "actions": [{**a, "_id": str(a["_id"])} for a in actions]
+        "actions": [
+            {
+                **a,
+                "_id": str(a["_id"]),
+                "timestamp": mongo_to_rome_iso(a.get("timestamp"))
+            }
+            for a in actions
+        ]
     }
     
     for action in actions:
         if action["action_type"] == "start":
             status["in_shift"] = True
-            status["shift_started_at"] = action["timestamp"].isoformat()
+            status["shift_started_at"] = mongo_to_rome_iso(action["timestamp"])
         elif action["action_type"] == "end":
             status["in_shift"] = False
             status["on_break"] = False
         elif action["action_type"] == "pause_start":
             status["on_break"] = True
-            status["current_break_started_at"] = action["timestamp"].isoformat()
+            status["current_break_started_at"] = mongo_to_rome_iso(action["timestamp"])
         elif action["action_type"] == "pause_end":
             status["on_break"] = False
             status["current_break_started_at"] = None
@@ -433,7 +450,6 @@ async def get_current_shift_status(current_user: dict = Depends(get_current_user
 
 @api_router.get("/shifts/history")
 async def get_shift_history(days: int = 30, current_user: dict = Depends(get_current_user)):
-    """Get shift history for the past N days"""
     start_date = now_rome() - timedelta(days=days)
     
     actions = await db.shift_actions.find({
@@ -443,16 +459,20 @@ async def get_shift_history(days: int = 30, current_user: dict = Depends(get_cur
     
     daily_data = {}
     for action in actions:
-        date_key = action["timestamp"].strftime("%Y-%m-%d")
+        action_ts_rome = mongo_to_rome(action["timestamp"])
+        date_key = action_ts_rome.strftime("%Y-%m-%d")
         if date_key not in daily_data:
             daily_data[date_key] = []
-        daily_data[date_key].append({**action, "_id": str(action["_id"])})
+        daily_data[date_key].append({
+            **action,
+            "_id": str(action["_id"]),
+            "timestamp": mongo_to_rome_iso(action.get("timestamp"))
+        })
     
     return daily_data
 
 @api_router.get("/shifts/daily-summary/{date}")
 async def get_daily_summary(date: str, current_user: dict = Depends(get_current_user)):
-    """Get daily summary for a specific date"""
     try:
         target_date = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=ROME_TZ)
     except ValueError:
@@ -478,21 +498,28 @@ async def get_daily_summary(date: str, current_user: dict = Depends(get_current_
         "notes": None,
         "start_location": None,
         "end_location": None,
-        "actions": [{**a, "_id": str(a["_id"])} for a in actions]
+        "actions": [
+            {
+                **a,
+                "_id": str(a["_id"]),
+                "timestamp": mongo_to_rome_iso(a.get("timestamp"))
+            }
+            for a in actions
+        ]
     }
     
     current_break_start = None
     
     for action in actions:
         if action["action_type"] == "start":
-            summary["start_time"] = action["timestamp"].isoformat()
+            summary["start_time"] = mongo_to_rome_iso(action["timestamp"])
             summary["start_location"] = {
                 "latitude": action.get("latitude"),
                 "longitude": action.get("longitude"),
                 "address": action.get("address")
             }
         elif action["action_type"] == "end":
-            summary["end_time"] = action["timestamp"].isoformat()
+            summary["end_time"] = mongo_to_rome_iso(action["timestamp"])
             summary["notes"] = action.get("notes")
             summary["end_location"] = {
                 "latitude": action.get("latitude"),
@@ -502,10 +529,10 @@ async def get_daily_summary(date: str, current_user: dict = Depends(get_current_
         elif action["action_type"] == "pause_start":
             current_break_start = action["timestamp"]
         elif action["action_type"] == "pause_end" and current_break_start:
-            break_minutes = int((action["timestamp"] - current_break_start).total_seconds() / 60)
+            break_minutes = int((mongo_to_rome(action["timestamp"]) - mongo_to_rome(current_break_start)).total_seconds() / 60)
             summary["breaks"].append({
-                "start": current_break_start.isoformat(),
-                "end": action["timestamp"].isoformat(),
+                "start": mongo_to_rome_iso(current_break_start),
+                "end": mongo_to_rome_iso(action["timestamp"]),
                 "minutes": break_minutes
             })
             summary["total_break_minutes"] += break_minutes
@@ -523,7 +550,6 @@ async def get_daily_summary(date: str, current_user: dict = Depends(get_current_
 
 @api_router.get("/reports/monthly/{year}/{month}")
 async def get_monthly_report(year: int, month: int, current_user: dict = Depends(get_current_user)):
-    """Get or generate monthly report for current user"""
     existing_report = await db.monthly_reports.find_one({
         "user_id": current_user["id"],
         "month": month,
@@ -541,11 +567,11 @@ async def get_monthly_report(year: int, month: int, current_user: dict = Depends
             "days_worked": existing_report["days_worked"],
             "daily_summaries": existing_report["daily_summaries"],
             "employee_signature": existing_report.get("employee_signature"),
-            "employee_signed_at": existing_report.get("employee_signed_at").isoformat() if existing_report.get("employee_signed_at") else None,
+            "employee_signed_at": mongo_to_rome_iso(existing_report.get("employee_signed_at")),
             "admin_signature": existing_report.get("admin_signature"),
-            "admin_signed_at": existing_report.get("admin_signed_at").isoformat() if existing_report.get("admin_signed_at") else None,
+            "admin_signed_at": mongo_to_rome_iso(existing_report.get("admin_signed_at")),
             "admin_id": existing_report.get("admin_id"),
-            "created_at": existing_report["created_at"].isoformat() if existing_report.get("created_at") else None
+            "created_at": mongo_to_rome_iso(existing_report.get("created_at"))
         }
         return serialized
     
@@ -564,7 +590,8 @@ async def get_monthly_report(year: int, month: int, current_user: dict = Depends
     current_break_start = None
     
     for action in actions:
-        date_key = action["timestamp"].strftime("%Y-%m-%d")
+        action_ts_rome = mongo_to_rome(action["timestamp"])
+        date_key = action_ts_rome.strftime("%Y-%m-%d")
         if date_key not in daily_summaries:
             daily_summaries[date_key] = {
                 "date": date_key,
@@ -578,17 +605,17 @@ async def get_monthly_report(year: int, month: int, current_user: dict = Depends
         summary = daily_summaries[date_key]
         
         if action["action_type"] == "start":
-            summary["start_time"] = action["timestamp"].strftime("%H:%M")
+            summary["start_time"] = action_ts_rome.strftime("%H:%M")
         elif action["action_type"] == "end":
-            summary["end_time"] = action["timestamp"].strftime("%H:%M")
+            summary["end_time"] = action_ts_rome.strftime("%H:%M")
             summary["notes"] = action.get("notes")
         elif action["action_type"] == "pause_start":
             current_break_start = action["timestamp"]
         elif action["action_type"] == "pause_end" and current_break_start:
-            break_minutes = int((action["timestamp"] - current_break_start).total_seconds() / 60)
+            break_minutes = int((mongo_to_rome(action["timestamp"]) - mongo_to_rome(current_break_start)).total_seconds() / 60)
             summary["breaks"].append({
-                "start": current_break_start.strftime("%H:%M"),
-                "end": action["timestamp"].strftime("%H:%M"),
+                "start": mongo_to_rome(current_break_start).strftime("%H:%M"),
+                "end": mongo_to_rome(action["timestamp"]).strftime("%H:%M"),
                 "minutes": break_minutes
             })
             summary["total_break_minutes"] += break_minutes
@@ -633,7 +660,6 @@ async def get_monthly_report(year: int, month: int, current_user: dict = Depends
 
 @api_router.post("/reports/monthly/{year}/{month}/sign")
 async def sign_monthly_report(year: int, month: int, signature: SignatureSubmit, current_user: dict = Depends(get_current_user)):
-    """Employee signs their monthly report"""
     report = await db.monthly_reports.find_one({
         "user_id": current_user["id"],
         "month": month,
@@ -657,7 +683,6 @@ async def sign_monthly_report(year: int, month: int, signature: SignatureSubmit,
 
 @api_router.get("/admin/employees")
 async def get_all_employees(admin: dict = Depends(get_admin_user)):
-    """Get all employees (admin only)"""
     employees = await db.users.find({"role": "employee"}).to_list(1000)
     return [
         {
@@ -665,14 +690,13 @@ async def get_all_employees(admin: dict = Depends(get_admin_user)):
             "email": e["email"],
             "name": e["name"],
             "profile_picture": e.get("profile_picture"),
-            "created_at": e["created_at"].isoformat()
+            "created_at": mongo_to_rome_iso(e.get("created_at"))
         }
         for e in employees
     ]
 
 @api_router.get("/admin/employees/{employee_id}/shifts")
 async def get_employee_shifts(employee_id: str, days: int = 30, admin: dict = Depends(get_admin_user)):
-    """Get employee shift history (admin only)"""
     start_date = now_rome() - timedelta(days=days)
     
     actions = await db.shift_actions.find({
@@ -680,11 +704,17 @@ async def get_employee_shifts(employee_id: str, days: int = 30, admin: dict = De
         "timestamp": {"$gte": start_date}
     }).sort("timestamp", -1).to_list(1000)
     
-    return [{**a, "_id": str(a["_id"])} for a in actions]
+    return [
+        {
+            **a,
+            "_id": str(a["_id"]),
+            "timestamp": mongo_to_rome_iso(a.get("timestamp"))
+        }
+        for a in actions
+    ]
 
 @api_router.get("/admin/employees/{employee_id}/locations")
 async def get_employee_locations(employee_id: str, date: str = None, admin: dict = Depends(get_admin_user)):
-    """Get employee GPS locations for a specific date (admin only)"""
     if date:
         try:
             target_date = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=ROME_TZ)
@@ -703,7 +733,7 @@ async def get_employee_locations(employee_id: str, date: str = None, admin: dict
         if action.get("latitude") and action.get("longitude"):
             locations.append({
                 "action_type": action["action_type"],
-                "timestamp": action["timestamp"].isoformat(),
+                "timestamp": mongo_to_rome_iso(action["timestamp"]),
                 "latitude": action["latitude"],
                 "longitude": action["longitude"],
                 "address": action.get("address")
@@ -713,7 +743,6 @@ async def get_employee_locations(employee_id: str, date: str = None, admin: dict
 
 @api_router.get("/admin/reports/unsigned")
 async def get_unsigned_reports(admin: dict = Depends(get_admin_user)):
-    """Get all reports pending admin signature"""
     reports = await db.monthly_reports.find({
         "employee_signature": {"$ne": None},
         "admin_signature": None
@@ -725,14 +754,16 @@ async def get_unsigned_reports(admin: dict = Depends(get_admin_user)):
         result.append({
             **report,
             "_id": str(report["_id"]),
-            "user_email": user["email"] if user else None
+            "user_email": user["email"] if user else None,
+            "employee_signed_at": mongo_to_rome_iso(report.get("employee_signed_at")),
+            "admin_signed_at": mongo_to_rome_iso(report.get("admin_signed_at")),
+            "created_at": mongo_to_rome_iso(report.get("created_at"))
         })
     
     return result
 
 @api_router.get("/admin/reports/{report_id}")
 async def get_report_details(report_id: str, admin: dict = Depends(get_admin_user)):
-    """Get specific report details (admin only)"""
     report = await db.monthly_reports.find_one({"id": report_id})
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -741,12 +772,14 @@ async def get_report_details(report_id: str, admin: dict = Depends(get_admin_use
     return {
         **report,
         "_id": str(report["_id"]),
-        "user_email": user["email"] if user else None
+        "user_email": user["email"] if user else None,
+        "employee_signed_at": mongo_to_rome_iso(report.get("employee_signed_at")),
+        "admin_signed_at": mongo_to_rome_iso(report.get("admin_signed_at")),
+        "created_at": mongo_to_rome_iso(report.get("created_at"))
     }
 
 @api_router.post("/admin/reports/{report_id}/countersign")
 async def countersign_report(report_id: str, signature: SignatureSubmit, admin: dict = Depends(get_admin_user)):
-    """Admin counter-signs an employee's monthly report"""
     report = await db.monthly_reports.find_one({"id": report_id})
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -767,7 +800,6 @@ async def countersign_report(report_id: str, signature: SignatureSubmit, admin: 
 
 @api_router.get("/admin/today-activity")
 async def get_today_activity(admin: dict = Depends(get_admin_user)):
-    """Get today's activity across all employees"""
     today_start = now_rome().replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
     
@@ -788,7 +820,8 @@ async def get_today_activity(admin: dict = Depends(get_admin_user)):
             }
         user_activity[user_id]["actions"].append({
             **action,
-            "_id": str(action["_id"])
+            "_id": str(action["_id"]),
+            "timestamp": mongo_to_rome_iso(action.get("timestamp"))
         })
     
     return list(user_activity.values())
