@@ -10,12 +10,20 @@ from pydantic import BaseModel, Field, EmailStr
 from typing import List, Optional
 import uuid
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import jwt
 from passlib.context import CryptContext
 import base64
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+
+ROME_TZ = ZoneInfo("Europe/Rome")
+
+
+def now_rome():
+    return datetime.now(ROME_TZ)
+
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']
@@ -78,7 +86,7 @@ class ShiftAction(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
     action_type: str  # "start", "end", "pause_start", "pause_end"
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=now_rome)
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     address: Optional[str] = None
@@ -118,7 +126,7 @@ class MonthlyReport(BaseModel):
     admin_signature: Optional[str] = None
     admin_signed_at: Optional[datetime] = None
     admin_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=now_rome)
 
 class SignatureSubmit(BaseModel):
     signature: str  # base64 encoded signature
@@ -144,7 +152,7 @@ class PasswordChange(BaseModel):
 
 def create_access_token(data: dict):
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
+    expire = now_rome() + timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -196,7 +204,7 @@ async def seed_admin_accounts():
                 "role": "admin",
                 "profile_picture": None,
                 "language": "it",
-                "created_at": datetime.utcnow()
+                "created_at": now_rome()
             }
             await db.users.insert_one(user_data)
             logger.info(f"Created admin account: {admin['email']}")
@@ -229,7 +237,7 @@ async def register(user: UserCreate):
         "role": "employee",
         "profile_picture": None,
         "language": "it",
-        "created_at": datetime.utcnow()
+        "created_at": now_rome()
     }
     await db.users.insert_one(user_data)
     
@@ -278,7 +286,7 @@ async def forgot_password(request: PasswordResetRequest):
     reset_code = str(uuid.uuid4())[:8].upper()
     await db.password_resets.update_one(
         {"email": request.email},
-        {"$set": {"code": reset_code, "created_at": datetime.utcnow()}},
+        {"$set": {"code": reset_code, "created_at": now_rome()}},
         upsert=True
     )
     
@@ -294,7 +302,7 @@ async def reset_password(request: PasswordResetConfirm):
     if not reset_record or reset_record["code"] != request.reset_code:
         raise HTTPException(status_code=400, detail="Invalid reset code")
     
-    if datetime.utcnow() - reset_record["created_at"] > timedelta(minutes=30):
+    if now_rome() - reset_record["created_at"] > timedelta(minutes=30):
         raise HTTPException(status_code=400, detail="Reset code expired")
     
     await db.users.update_one(
@@ -366,7 +374,7 @@ async def record_shift_action(action: ShiftActionCreate, current_user: dict = De
         "id": str(uuid.uuid4()),
         "user_id": current_user["id"],
         "action_type": action.action_type,
-        "timestamp": datetime.utcnow(),
+        "timestamp": now_rome(),
         "latitude": action.latitude,
         "longitude": action.longitude,
         "address": action.address,
@@ -378,7 +386,7 @@ async def record_shift_action(action: ShiftActionCreate, current_user: dict = De
 @api_router.get("/shifts/today")
 async def get_today_shifts(current_user: dict = Depends(get_current_user)):
     """Get today's shift actions for current user"""
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = now_rome().replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
     
     actions = await db.shift_actions.find({
@@ -391,7 +399,7 @@ async def get_today_shifts(current_user: dict = Depends(get_current_user)):
 @api_router.get("/shifts/current-status")
 async def get_current_shift_status(current_user: dict = Depends(get_current_user)):
     """Get current shift status (in_shift, on_break, etc.)"""
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = now_rome().replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
     
     actions = await db.shift_actions.find({
@@ -426,7 +434,7 @@ async def get_current_shift_status(current_user: dict = Depends(get_current_user
 @api_router.get("/shifts/history")
 async def get_shift_history(days: int = 30, current_user: dict = Depends(get_current_user)):
     """Get shift history for the past N days"""
-    start_date = datetime.utcnow() - timedelta(days=days)
+    start_date = now_rome() - timedelta(days=days)
     
     actions = await db.shift_actions.find({
         "user_id": current_user["id"],
@@ -446,7 +454,7 @@ async def get_shift_history(days: int = 30, current_user: dict = Depends(get_cur
 async def get_daily_summary(date: str, current_user: dict = Depends(get_current_user)):
     """Get daily summary for a specific date"""
     try:
-        target_date = datetime.strptime(date, "%Y-%m-%d")
+        target_date = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=ROME_TZ)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
     
@@ -541,11 +549,11 @@ async def get_monthly_report(year: int, month: int, current_user: dict = Depends
         }
         return serialized
     
-    start_date = datetime(year, month, 1)
+    start_date = datetime(year, month, 1, tzinfo=ROME_TZ)
     if month == 12:
-        end_date = datetime(year + 1, 1, 1)
+        end_date = datetime(year + 1, 1, 1, tzinfo=ROME_TZ)
     else:
-        end_date = datetime(year, month + 1, 1)
+        end_date = datetime(year, month + 1, 1, tzinfo=ROME_TZ)
     
     actions = await db.shift_actions.find({
         "user_id": current_user["id"],
@@ -591,8 +599,8 @@ async def get_monthly_report(year: int, month: int, current_user: dict = Depends
     
     for date_key, summary in daily_summaries.items():
         if summary["start_time"] and summary["end_time"]:
-            start = datetime.strptime(f"{date_key} {summary['start_time']}", "%Y-%m-%d %H:%M")
-            end = datetime.strptime(f"{date_key} {summary['end_time']}", "%Y-%m-%d %H:%M")
+            start = datetime.strptime(f"{date_key} {summary['start_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=ROME_TZ)
+            end = datetime.strptime(f"{date_key} {summary['end_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=ROME_TZ)
             day_minutes = int((end - start).total_seconds() / 60) - summary["total_break_minutes"]
             summary["work_minutes"] = max(0, day_minutes)
             summary["work_hours"] = round(day_minutes / 60, 2)
@@ -613,7 +621,7 @@ async def get_monthly_report(year: int, month: int, current_user: dict = Depends
         "admin_signature": None,
         "admin_signed_at": None,
         "admin_id": None,
-        "created_at": datetime.utcnow()
+        "created_at": now_rome()
     }
     
     await db.monthly_reports.insert_one(report)
@@ -639,7 +647,7 @@ async def sign_monthly_report(year: int, month: int, signature: SignatureSubmit,
         {"id": report["id"]},
         {"$set": {
             "employee_signature": signature.signature,
-            "employee_signed_at": datetime.utcnow()
+            "employee_signed_at": now_rome()
         }}
     )
     
@@ -665,7 +673,7 @@ async def get_all_employees(admin: dict = Depends(get_admin_user)):
 @api_router.get("/admin/employees/{employee_id}/shifts")
 async def get_employee_shifts(employee_id: str, days: int = 30, admin: dict = Depends(get_admin_user)):
     """Get employee shift history (admin only)"""
-    start_date = datetime.utcnow() - timedelta(days=days)
+    start_date = now_rome() - timedelta(days=days)
     
     actions = await db.shift_actions.find({
         "user_id": employee_id,
@@ -679,7 +687,7 @@ async def get_employee_locations(employee_id: str, date: str = None, admin: dict
     """Get employee GPS locations for a specific date (admin only)"""
     if date:
         try:
-            target_date = datetime.strptime(date, "%Y-%m-%d")
+            target_date = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=ROME_TZ)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format")
         day_start = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -750,7 +758,7 @@ async def countersign_report(report_id: str, signature: SignatureSubmit, admin: 
         {"id": report_id},
         {"$set": {
             "admin_signature": signature.signature,
-            "admin_signed_at": datetime.utcnow(),
+            "admin_signed_at": now_rome(),
             "admin_id": admin["id"]
         }}
     )
@@ -760,7 +768,7 @@ async def countersign_report(report_id: str, signature: SignatureSubmit, admin: 
 @api_router.get("/admin/today-activity")
 async def get_today_activity(admin: dict = Depends(get_admin_user)):
     """Get today's activity across all employees"""
-    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = now_rome().replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
     
     actions = await db.shift_actions.find({
@@ -789,7 +797,7 @@ async def get_today_activity(admin: dict = Depends(get_admin_user)):
 
 @api_router.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "healthy", "timestamp": now_rome().isoformat()}
 
 # Include router
 app.include_router(api_router)
