@@ -283,7 +283,7 @@ async def login(credentials: UserLogin):
             role=user["role"],
             profile_picture=user.get("profile_picture"),
             language=user.get("language", "it"),
-            created_at=user["created_at"]
+            created_at=mongo_to_rome(user["created_at"])
         )
     )
 
@@ -550,48 +550,28 @@ async def get_daily_summary(date: str, current_user: dict = Depends(get_current_
 
 @api_router.get("/reports/monthly/{year}/{month}")
 async def get_monthly_report(year: int, month: int, current_user: dict = Depends(get_current_user)):
-    existing_report = await db.monthly_reports.find_one({
-        "user_id": current_user["id"],
-        "month": month,
-        "year": year
-    })
-    
-    if existing_report:
-        serialized = {
-            "id": existing_report["id"],
-            "user_id": existing_report["user_id"],
-            "user_name": existing_report["user_name"],
-            "month": existing_report["month"],
-            "year": existing_report["year"],
-            "total_hours": existing_report["total_hours"],
-            "days_worked": existing_report["days_worked"],
-            "daily_summaries": existing_report["daily_summaries"],
-            "employee_signature": existing_report.get("employee_signature"),
-            "employee_signed_at": mongo_to_rome_iso(existing_report.get("employee_signed_at")),
-            "admin_signature": existing_report.get("admin_signature"),
-            "admin_signed_at": mongo_to_rome_iso(existing_report.get("admin_signed_at")),
-            "admin_id": existing_report.get("admin_id"),
-            "created_at": mongo_to_rome_iso(existing_report.get("created_at"))
-        }
-        return serialized
-    
+    """
+    Genera sempre il report mensile leggendo tutte le timbrature del mese.
+    Se esiste già un report salvato, lo aggiorna invece di restituire quello vecchio.
+    """
     start_date = datetime(year, month, 1, tzinfo=ROME_TZ)
     if month == 12:
         end_date = datetime(year + 1, 1, 1, tzinfo=ROME_TZ)
     else:
         end_date = datetime(year, month + 1, 1, tzinfo=ROME_TZ)
-    
+
     actions = await db.shift_actions.find({
         "user_id": current_user["id"],
         "timestamp": {"$gte": start_date, "$lt": end_date}
-    }).sort("timestamp", 1).to_list(1000)
-    
+    }).sort("timestamp", 1).to_list(5000)
+
     daily_summaries = {}
     current_break_start = None
-    
+
     for action in actions:
         action_ts_rome = mongo_to_rome(action["timestamp"])
         date_key = action_ts_rome.strftime("%Y-%m-%d")
+
         if date_key not in daily_summaries:
             daily_summaries[date_key] = {
                 "date": date_key,
@@ -601,18 +581,23 @@ async def get_monthly_report(year: int, month: int, current_user: dict = Depends
                 "total_break_minutes": 0,
                 "notes": None
             }
-        
+
         summary = daily_summaries[date_key]
-        
+
         if action["action_type"] == "start":
             summary["start_time"] = action_ts_rome.strftime("%H:%M")
+
         elif action["action_type"] == "end":
             summary["end_time"] = action_ts_rome.strftime("%H:%M")
             summary["notes"] = action.get("notes")
+
         elif action["action_type"] == "pause_start":
             current_break_start = action["timestamp"]
+
         elif action["action_type"] == "pause_end" and current_break_start:
-            break_minutes = int((mongo_to_rome(action["timestamp"]) - mongo_to_rome(current_break_start)).total_seconds() / 60)
+            break_minutes = int(
+                (mongo_to_rome(action["timestamp"]) - mongo_to_rome(current_break_start)).total_seconds() / 60
+            )
             summary["breaks"].append({
                 "start": mongo_to_rome(current_break_start).strftime("%H:%M"),
                 "end": mongo_to_rome(action["timestamp"]).strftime("%H:%M"),
@@ -620,22 +605,48 @@ async def get_monthly_report(year: int, month: int, current_user: dict = Depends
             })
             summary["total_break_minutes"] += break_minutes
             current_break_start = None
-    
+
     total_minutes = 0
     days_worked = 0
-    
+
     for date_key, summary in daily_summaries.items():
         if summary["start_time"] and summary["end_time"]:
-            start = datetime.strptime(f"{date_key} {summary['start_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=ROME_TZ)
-            end = datetime.strptime(f"{date_key} {summary['end_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=ROME_TZ)
+            start = datetime.strptime(
+                f"{date_key} {summary['start_time']}",
+                "%Y-%m-%d %H:%M"
+            ).replace(tzinfo=ROME_TZ)
+
+            end = datetime.strptime(
+                f"{date_key} {summary['end_time']}",
+                "%Y-%m-%d %H:%M"
+            ).replace(tzinfo=ROME_TZ)
+
             day_minutes = int((end - start).total_seconds() / 60) - summary["total_break_minutes"]
-            summary["work_minutes"] = max(0, day_minutes)
+            day_minutes = max(0, day_minutes)
+
+            summary["work_minutes"] = day_minutes
             summary["work_hours"] = round(day_minutes / 60, 2)
+
             total_minutes += day_minutes
             days_worked += 1
-    
+
+    existing_report = await db.monthly_reports.find_one({
+        "user_id": current_user["id"],
+        "month": month,
+        "year": year
+    })
+
+    report_id = existing_report["id"] if existing_report else str(uuid.uuid4())
+
+    employee_signature = existing_report.get("employee_signature") if existing_report else None
+    employee_signed_at = existing_report.get("employee_signed_at") if existing_report else None
+    admin_signature = existing_report.get("admin_signature") if existing_report else None
+    admin_signed_at = existing_report.get("admin_signed_at") if existing_report else None
+    admin_id = existing_report.get("admin_id") if existing_report else None
+    created_at = existing_report.get("created_at", now_rome()) if existing_report else now_rome()
+
     report = {
-        "id": str(uuid.uuid4()),
+        "id": report_id,
         "user_id": current_user["id"],
         "user_name": current_user["name"],
         "month": month,
@@ -643,19 +654,41 @@ async def get_monthly_report(year: int, month: int, current_user: dict = Depends
         "total_hours": round(total_minutes / 60, 2),
         "days_worked": days_worked,
         "daily_summaries": list(daily_summaries.values()),
-        "employee_signature": None,
-        "employee_signed_at": None,
-        "admin_signature": None,
-        "admin_signed_at": None,
-        "admin_id": None,
-        "created_at": now_rome()
+        "employee_signature": employee_signature,
+        "employee_signed_at": employee_signed_at,
+        "admin_signature": admin_signature,
+        "admin_signed_at": admin_signed_at,
+        "admin_id": admin_id,
+        "created_at": created_at,
+        "updated_at": now_rome()
     }
-    
-    await db.monthly_reports.insert_one(report)
-    
+
+    await db.monthly_reports.update_one(
+        {
+            "user_id": current_user["id"],
+            "month": month,
+            "year": year
+        },
+        {"$set": report},
+        upsert=True
+    )
+
     return {
-        **report,
-        "created_at": report["created_at"].isoformat()
+        "id": report["id"],
+        "user_id": report["user_id"],
+        "user_name": report["user_name"],
+        "month": report["month"],
+        "year": report["year"],
+        "total_hours": report["total_hours"],
+        "days_worked": report["days_worked"],
+        "daily_summaries": report["daily_summaries"],
+        "employee_signature": report.get("employee_signature"),
+        "employee_signed_at": mongo_to_rome_iso(report.get("employee_signed_at")),
+        "admin_signature": report.get("admin_signature"),
+        "admin_signed_at": mongo_to_rome_iso(report.get("admin_signed_at")),
+        "admin_id": report.get("admin_id"),
+        "created_at": mongo_to_rome_iso(report.get("created_at")),
+        "updated_at": mongo_to_rome_iso(report.get("updated_at"))
     }
 
 @api_router.post("/reports/monthly/{year}/{month}/sign")
@@ -757,7 +790,8 @@ async def get_unsigned_reports(admin: dict = Depends(get_admin_user)):
             "user_email": user["email"] if user else None,
             "employee_signed_at": mongo_to_rome_iso(report.get("employee_signed_at")),
             "admin_signed_at": mongo_to_rome_iso(report.get("admin_signed_at")),
-            "created_at": mongo_to_rome_iso(report.get("created_at"))
+            "created_at": mongo_to_rome_iso(report.get("created_at")),
+            "updated_at": mongo_to_rome_iso(report.get("updated_at"))
         })
     
     return result
@@ -775,7 +809,8 @@ async def get_report_details(report_id: str, admin: dict = Depends(get_admin_use
         "user_email": user["email"] if user else None,
         "employee_signed_at": mongo_to_rome_iso(report.get("employee_signed_at")),
         "admin_signed_at": mongo_to_rome_iso(report.get("admin_signed_at")),
-        "created_at": mongo_to_rome_iso(report.get("created_at"))
+        "created_at": mongo_to_rome_iso(report.get("created_at")),
+        "updated_at": mongo_to_rome_iso(report.get("updated_at"))
     }
 
 @api_router.post("/admin/reports/{report_id}/countersign")
