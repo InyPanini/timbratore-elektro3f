@@ -1,5 +1,6 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -11,9 +12,16 @@ from typing import List, Optional
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+from io import BytesIO
 import jwt
 from passlib.context import CryptContext
 import base64
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -38,6 +46,119 @@ def mongo_to_rome(dt: datetime | None):
 def mongo_to_rome_iso(dt: datetime | None):
     converted = mongo_to_rome(dt)
     return converted.isoformat() if converted else None
+
+
+def build_monthly_report_pdf(report: dict, user_email: str | None = None) -> BytesIO:
+    buffer = BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm
+    )
+
+    styles = getSampleStyleSheet()
+    story = []
+
+    title_style = styles["Title"]
+    heading_style = styles["Heading2"]
+    normal_style = styles["Normal"]
+
+    story.append(Paragraph("Elektro 3F", title_style))
+    story.append(Paragraph("Report Mensile Presenze", heading_style))
+    story.append(Spacer(1, 6))
+
+    month_str = f"{int(report['month']):02d}/{report['year']}"
+    story.append(Paragraph(f"<b>Dipendente:</b> {report['user_name']}", normal_style))
+    if user_email:
+        story.append(Paragraph(f"<b>Email:</b> {user_email}", normal_style))
+    story.append(Paragraph(f"<b>Periodo:</b> {month_str}", normal_style))
+    story.append(Paragraph(f"<b>Ore totali:</b> {report['total_hours']}", normal_style))
+    story.append(Paragraph(f"<b>Giorni lavorati:</b> {report['days_worked']}", normal_style))
+    story.append(Paragraph(f"<b>Generato il:</b> {now_rome().strftime('%d/%m/%Y %H:%M')}", normal_style))
+    story.append(Spacer(1, 10))
+
+    table_data = [[
+        "Data",
+        "Inizio",
+        "Fine",
+        "Pause",
+        "Ore lavorate",
+        "Note"
+    ]]
+
+    daily_summaries = sorted(report.get("daily_summaries", []), key=lambda x: x.get("date", ""))
+
+    for day in daily_summaries:
+        pauses = "-"
+        if day.get("breaks"):
+            pauses = ", ".join([
+                f"{b.get('start', '')}-{b.get('end', '')} ({b.get('minutes', 0)} min)"
+                for b in day["breaks"]
+            ])
+
+        work_hours = day.get("work_hours")
+        if work_hours is None and day.get("work_minutes") is not None:
+            work_hours = round(day["work_minutes"] / 60, 2)
+
+        note_text = day.get("notes") or "-"
+
+        table_data.append([
+            day.get("date", "-"),
+            day.get("start_time", "-") or "-",
+            day.get("end_time", "-") or "-",
+            pauses,
+            str(work_hours) if work_hours is not None else "-",
+            note_text
+        ])
+
+    table = Table(
+        table_data,
+        colWidths=[24 * mm, 20 * mm, 20 * mm, 55 * mm, 28 * mm, 38 * mm],
+        repeatRows=1
+    )
+
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f4e78")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.whitesmoke, colors.lightgrey]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+
+    story.append(table)
+    story.append(Spacer(1, 14))
+
+    story.append(Paragraph("<b>Firme</b>", heading_style))
+    story.append(Spacer(1, 8))
+
+    sign_table = Table([
+        ["Firma Dipendente", "Firma Datore / Amministratore"],
+        ["\n\n\n____________________________\n", "\n\n\n____________________________\n"]
+    ], colWidths=[85 * mm, 85 * mm])
+
+    sign_table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.7, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d9eaf7")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+
+    story.append(sign_table)
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
 
 
 # MongoDB connection
@@ -690,6 +811,24 @@ async def get_monthly_report(year: int, month: int, current_user: dict = Depends
         "created_at": mongo_to_rome_iso(report.get("created_at")),
         "updated_at": mongo_to_rome_iso(report.get("updated_at"))
     }
+
+@api_router.get("/reports/monthly/{year}/{month}/pdf")
+async def download_monthly_report_pdf(year: int, month: int, current_user: dict = Depends(get_current_user)):
+    report = await get_monthly_report(year, month, current_user)
+
+    user = await db.users.find_one({"id": current_user["id"]})
+    user_email = user.get("email") if user else None
+
+    pdf_buffer = build_monthly_report_pdf(report, user_email=user_email)
+
+    safe_name = current_user["name"].replace(" ", "_")
+    filename = f"report_mensile_{safe_name}_{year}_{month:02d}.pdf"
+
+    return StreamingResponse(
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 @api_router.post("/reports/monthly/{year}/{month}/sign")
 async def sign_monthly_report(year: int, month: int, signature: SignatureSubmit, current_user: dict = Depends(get_current_user)):
