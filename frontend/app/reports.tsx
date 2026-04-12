@@ -15,8 +15,9 @@ import { useTranslation } from 'react-i18next';
 import { Ionicons } from '@expo/vector-icons';
 import { format } from 'date-fns';
 import SignatureCanvas from 'react-native-signature-canvas';
-import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Logo from '../src/components/Logo';
 import HamburgerMenu from '../src/components/HamburgerMenu';
 import { getMonthlyReport, signMonthlyReport } from '../src/services/api';
@@ -26,6 +27,8 @@ const months = [
   'january', 'february', 'march', 'april', 'may', 'june',
   'july', 'august', 'september', 'october', 'november', 'december'
 ];
+
+const API_URL = 'https://timbratore-elektro3f-backend.onrender.com';
 
 export default function Reports() {
   const { t, i18n } = useTranslation();
@@ -38,6 +41,7 @@ export default function Reports() {
   const [isLoading, setIsLoading] = useState(false);
   const [showSignatureModal, setShowSignatureModal] = useState(false);
   const [signing, setSigning] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   const loadReport = async () => {
     setIsLoading(true);
@@ -71,7 +75,6 @@ export default function Reports() {
   };
 
   const handleSignatureEnd = () => {
-    // Called when user finishes drawing - we can read the signature here
     if (signatureRef.current) {
       signatureRef.current.readSignature();
     }
@@ -84,123 +87,75 @@ export default function Reports() {
   };
 
   const generatePDF = async () => {
-    if (!report) return;
+    if (!report) {
+      Alert.alert(t('error'), 'Load the report first');
+      return;
+    }
 
-    const html = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <style>
-          body { font-family: Arial, sans-serif; padding: 40px; background: #fff; }
-          .header { text-align: center; margin-bottom: 30px; border-bottom: 2px solid #4CAF50; padding-bottom: 20px; }
-          .logo { color: #4CAF50; font-size: 32px; font-weight: bold; }
-          .subtitle { color: #666; font-size: 14px; font-style: italic; }
-          .report-title { font-size: 24px; margin: 30px 0; text-align: center; }
-          .info-section { margin-bottom: 30px; }
-          .info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
-          .summary { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
-          .summary-row { display: flex; justify-content: space-between; margin: 10px 0; }
-          .summary-label { font-weight: bold; }
-          .summary-value { color: #4CAF50; font-size: 20px; }
-          table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-          th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-          th { background: #4CAF50; color: white; }
-          tr:nth-child(even) { background: #f9f9f9; }
-          .signatures { margin-top: 40px; display: flex; justify-content: space-between; }
-          .signature-box { width: 45%; text-align: center; }
-          .signature-line { border-top: 1px solid #000; margin-top: 60px; padding-top: 10px; }
-          .signature-img { max-width: 200px; max-height: 80px; }
-        </style>
-      </head>
-      <body>
-        <div class="header">
-          <div class="logo">ELEKTRO 3F SRLS</div>
-          <div class="subtitle">Accendi il tuo mondo con noi</div>
-        </div>
-        
-        <h1 class="report-title">REPORT MENSILE - ${t(months[selectedMonth - 1]).toUpperCase()} ${selectedYear}</h1>
-        
-        <div class="info-section">
-          <div class="info-row">
-            <span>Dipendente:</span>
-            <span><strong>${report.user_name}</strong></span>
-          </div>
-          <div class="info-row">
-            <span>Periodo:</span>
-            <span>${t(months[selectedMonth - 1])} ${selectedYear}</span>
-          </div>
-        </div>
-        
-        <div class="summary">
-          <div class="summary-row">
-            <span class="summary-label">Ore Totali:</span>
-            <span class="summary-value">${report.total_hours.toFixed(2)} h</span>
-          </div>
-          <div class="summary-row">
-            <span class="summary-label">Giorni Lavorati:</span>
-            <span class="summary-value">${report.days_worked}</span>
-          </div>
-        </div>
-        
-        <table>
-          <thead>
-            <tr>
-              <th>Data</th>
-              <th>Inizio</th>
-              <th>Fine</th>
-              <th>Pause</th>
-              <th>Ore Lavorate</th>
-              <th>Note</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${report.daily_summaries.map((day: any) => `
-              <tr>
-                <td>${day.date}</td>
-                <td>${day.start_time || '-'}</td>
-                <td>${day.end_time || '-'}</td>
-                <td>${day.total_break_minutes || 0} min</td>
-                <td>${day.work_hours?.toFixed(2) || '-'} h</td>
-                <td>${day.notes || '-'}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-        
-        <div class="signatures">
-          <div class="signature-box">
-            <p><strong>${t('employeeSignature')}</strong></p>
-            ${report.employee_signature 
-              ? `<img src="${report.employee_signature}" class="signature-img" />`
-              : '<div class="signature-line">Non firmato</div>'
-            }
-            ${report.employee_signed_at 
-              ? `<p style="font-size: 12px; color: #666;">Firmato: ${format(new Date(report.employee_signed_at), 'dd/MM/yyyy HH:mm')}</p>`
-              : ''
-            }
-          </div>
-          <div class="signature-box">
-            <p><strong>${t('adminSignature')}</strong></p>
-            ${report.admin_signature 
-              ? `<img src="${report.admin_signature}" class="signature-img" />`
-              : '<div class="signature-line">In attesa</div>'
-            }
-            ${report.admin_signed_at 
-              ? `<p style="font-size: 12px; color: #666;">Firmato: ${format(new Date(report.admin_signed_at), 'dd/MM/yyyy HH:mm')}</p>`
-              : ''
-            }
-          </div>
-        </div>
-      </body>
-      </html>
-    `;
+    setDownloadingPdf(true);
 
     try {
-      const { uri } = await Print.printToFileAsync({ html });
-      await Sharing.shareAsync(uri);
-    } catch (error) {
-      console.error('PDF generation error:', error);
+      const token = await AsyncStorage.getItem('auth_token');
+      if (!token) {
+        Alert.alert(t('error'), 'Authentication token not found');
+        return;
+      }
+
+      const url = `${API_URL}/api/reports/monthly/${selectedYear}/${selectedMonth}/pdf`;
+
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(errorText || `HTTP ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const reader = new FileReader();
+
+      const base64: string = await new Promise((resolve, reject) => {
+        reader.onloadend = () => {
+          const result = reader.result as string;
+          const commaIndex = result.indexOf(',');
+          if (commaIndex === -1) {
+            reject(new Error('Failed to convert PDF to base64'));
+            return;
+          }
+          resolve(result.slice(commaIndex + 1));
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+
+      const safeMonth = String(selectedMonth).padStart(2, '0');
+      const fileName = `report_mensile_${selectedYear}_${safeMonth}.pdf`;
+      const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
+
+      await FileSystem.writeAsStringAsync(fileUri, base64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      const canShare = await Sharing.isAvailableAsync();
+      if (!canShare) {
+        Alert.alert(t('error'), 'Sharing is not available on this device');
+        return;
+      }
+
+      await Sharing.shareAsync(fileUri, {
+        mimeType: 'application/pdf',
+        dialogTitle: 'Apri o salva il report PDF',
+        UTI: 'com.adobe.pdf',
+      });
+    } catch (error: any) {
+      console.error('PDF download error:', error);
+      Alert.alert(t('error'), 'Errore durante la generazione del PDF');
+    } finally {
+      setDownloadingPdf(false);
     }
   };
 
@@ -209,7 +164,7 @@ export default function Reports() {
   return (
     <SafeAreaView style={styles.container}>
       <HamburgerMenu currentRoute="/reports" />
-      
+
       <ScrollView contentContainerStyle={styles.scrollContent}>
         <View style={styles.header}>
           <Logo size="small" />
@@ -218,12 +173,11 @@ export default function Reports() {
           </Text>
         </View>
 
-        {/* Month/Year Selector */}
         <View style={styles.selectorContainer}>
           <Text style={[styles.selectorLabel, rtl && styles.rtlText]}>
             {t('selectMonth')}
           </Text>
-          
+
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.yearSelector}>
             {years.map((year) => (
               <TouchableOpacity
@@ -234,10 +188,12 @@ export default function Reports() {
                 ]}
                 onPress={() => setSelectedYear(year)}
               >
-                <Text style={[
-                  styles.yearButtonText,
-                  selectedYear === year && styles.yearButtonTextActive
-                ]}>
+                <Text
+                  style={[
+                    styles.yearButtonText,
+                    selectedYear === year && styles.yearButtonTextActive
+                  ]}
+                >
                   {year}
                 </Text>
               </TouchableOpacity>
@@ -254,10 +210,12 @@ export default function Reports() {
                 ]}
                 onPress={() => setSelectedMonth(index + 1)}
               >
-                <Text style={[
-                  styles.monthButtonText,
-                  selectedMonth === index + 1 && styles.monthButtonTextActive
-                ]}>
+                <Text
+                  style={[
+                    styles.monthButtonText,
+                    selectedMonth === index + 1 && styles.monthButtonTextActive
+                  ]}
+                >
                   {t(month).substring(0, 3)}
                 </Text>
               </TouchableOpacity>
@@ -272,12 +230,11 @@ export default function Reports() {
             {isLoading ? (
               <ActivityIndicator color="#000" />
             ) : (
-              <Text style={styles.loadButtonText}>{t('generatePDF')}</Text>
+              <Text style={styles.loadButtonText}>Carica Report</Text>
             )}
           </TouchableOpacity>
         </View>
 
-        {/* Report Display */}
         {report && (
           <View style={styles.reportContainer}>
             <View style={styles.reportHeader}>
@@ -297,7 +254,6 @@ export default function Reports() {
               </View>
             </View>
 
-            {/* Daily Summaries */}
             <View style={styles.dailyList}>
               {report.daily_summaries.map((day: any, index: number) => (
                 <View key={index} style={styles.dailyItem}>
@@ -321,10 +277,9 @@ export default function Reports() {
               ))}
             </View>
 
-            {/* Signature Status */}
             <View style={styles.signaturesSection}>
               <Text style={styles.sectionTitle}>Firme</Text>
-              
+
               <View style={styles.signatureStatus}>
                 <View style={[styles.signatureRow, rtl && styles.signatureRowRTL]}>
                   <Text style={styles.signatureLabel}>{t('employeeSignature')}:</Text>
@@ -340,7 +295,7 @@ export default function Reports() {
                     </View>
                   )}
                 </View>
-                
+
                 <View style={[styles.signatureRow, rtl && styles.signatureRowRTL]}>
                   <Text style={styles.signatureLabel}>{t('adminSignature')}:</Text>
                   {report.admin_signature ? (
@@ -358,7 +313,6 @@ export default function Reports() {
               </View>
             </View>
 
-            {/* Action Buttons */}
             <View style={styles.actionsContainer}>
               {!report.employee_signature && (
                 <TouchableOpacity
@@ -369,20 +323,26 @@ export default function Reports() {
                   <Text style={styles.signButtonText}>{t('signReport')}</Text>
                 </TouchableOpacity>
               )}
-              
+
               <TouchableOpacity
-                style={styles.downloadButton}
+                style={[styles.downloadButton, downloadingPdf && styles.buttonDisabled]}
                 onPress={generatePDF}
+                disabled={downloadingPdf}
               >
-                <Ionicons name="download" size={20} color="#4CAF50" />
-                <Text style={styles.downloadButtonText}>{t('downloadPDF')}</Text>
+                {downloadingPdf ? (
+                  <ActivityIndicator color="#4CAF50" />
+                ) : (
+                  <>
+                    <Ionicons name="download" size={20} color="#4CAF50" />
+                    <Text style={styles.downloadButtonText}>{t('downloadPDF')}</Text>
+                  </>
+                )}
               </TouchableOpacity>
             </View>
           </View>
         )}
       </ScrollView>
 
-      {/* Signature Modal */}
       <Modal
         visible={showSignatureModal}
         transparent
@@ -397,7 +357,7 @@ export default function Reports() {
                 <Ionicons name="close" size={28} color="#fff" />
               </TouchableOpacity>
             </View>
-            
+
             <View style={styles.signatureContainer}>
               <SignatureCanvas
                 ref={signatureRef}
@@ -444,7 +404,7 @@ export default function Reports() {
                 dataURL=""
               />
             </View>
-            
+
             {signing && (
               <View style={styles.signingOverlay}>
                 <ActivityIndicator size="large" color="#4CAF50" />
